@@ -1,0 +1,58 @@
+nohup: ignoring input
+Total trials  : 1600
+Grid sizes    : [7]
+Robot counts  : [2, 3, 4, 5, 6]
+Densities     : 8 points
+Trials/config : 40
+SA config     : 200 reads x 60000 sweeps
+Workers       : 27
+
+      40/1600  (  2.5%)  elapsed=480s  eta=18702s
+      80/1600  (  5.0%)  elapsed=691s  eta=13127s
+     120/1600  (  7.5%)  elapsed=999s  eta=12320s
+     160/1600  ( 10.0%)  elapsed=1234s  eta=11103s
+     200/1600  ( 12.5%)  elapsed=1539s  eta=10773s
+     240/1600  ( 15.0%)  elapsed=1841s  eta=10431s
+     280/1600  ( 17.5%)  elapsed=2103s  eta=9916s
+     320/1600  ( 20.0%)  elapsed=2388s  eta=9550s
+     360/1600  ( 22.5%)  elapsed=2706s  eta=9320s
+     400/1600  ( 25.0%)  elapsed=3039s  eta=9118s
+     440/1600  ( 27.5%)  elapsed=3319s  eta=8751s
+     480/1600  ( 30.0%)  elapsed=3688s  eta=8605s
+     520/1600  ( 32.5%)  elapsed=3903s  eta=8106s
+     560/1600  ( 35.0%)  elapsed=4278s  eta=7945s
+     600/1600  ( 37.5%)  elapsed=4535s  eta=7558s
+     640/1600  ( 40.0%)  elapsed=4915s  eta=7373s
+     680/1600  ( 42.5%)  elapsed=5274s  eta=7135s
+     720/1600  ( 45.0%)  elapsed=5629s  eta=6880s
+     760/1600  ( 47.5%)  elapsed=5975s  eta=6604s
+     800/1600  ( 50.0%)  elapsed=6288s  eta=6288s
+     840/1600  ( 52.5%)  elapsed=6700s  eta=6062s
+     880/1600  ( 55.0%)  elapsed=7042s  eta=5762s
+     920/1600  ( 57.5%)  elapsed=7386s  eta=5459s
+     960/1600  ( 60.0%)  elapsed=7763s  eta=5175s
+    1000/1600  ( 62.5%)  elapsed=8195s  eta=4917s
+    1040/1600  ( 65.0%)  elapsed=8637s  eta=4651s
+    1080/1600  ( 67.5%)  elapsed=8986s  eta=4326s
+    1120/1600  ( 70.0%)  elapsed=9436s  eta=4044s
+    1160/1600  ( 72.5%)  elapsed=9828s  eta=3728s
+    1200/1600  ( 75.0%)  elapsed=10231s  eta=3410s
+    1240/1600  ( 77.5%)  elapsed=10608s  eta=3080s
+    1280/1600  ( 80.0%)  elapsed=11033s  eta=2758s
+    1320/1600  ( 82.5%)  elapsed=11543s  eta=2448s
+    1360/1600  ( 85.0%)  elapsed=11968s  eta=2112s
+    1400/1600  ( 87.5%)  elapsed=12466s  eta=1781s
+    1440/1600  ( 90.0%)  elapsed=12911s  eta=1435s
+    1480/1600  ( 92.5%)  elapsed=13386s  eta=1085s
+    1520/1600  ( 95.0%)  elapsed=13858s  eta=729s
+    1560/1600  ( 97.5%)  elapsed=14329s  eta=367s
+    1600/1600  (100.0%)  elapsed=14568s  eta=0s
+
+Finished 1600 trials in 14568.0s  (0.1 trials/sec)
+CSV saved -> data/multi_paper/multi_robot_results.csv
+Saved: data/multi_paper/fig1_joint_success.png
+Saved: data/multi_paper/fig2_success_vs_density.png
+Saved: data/multi_paper/fig3_solve_time.png
+Saved: data/multi_paper/fig4_grid_scaling.png
+
+Total wall time: 1278.1 min
