@@ -75,9 +75,19 @@ class MultiRobotConfig:
 
     # SA settings
     sa_reads:  int   = 50
-    sa_sweeps: int   = 30_000
-    sa_T0:     float = 15.0
-    sa_Tf:     float = 0.001
+    sa_sweeps: int   = 30_000      # legacy only: single-bit proposals per read
+    sa_T0:     float = 15.0        # legacy only
+    sa_Tf:     float = 0.001       # legacy only
+
+    # QUBO formulation / annealer (see qubo_core.py and the note in
+    # qubo_path_planner.GridConfig). "legacy" reproduces the manuscript;
+    # it has no edge-swap term and counts P6 pairs twice.
+    formulation:    str   = "improved"
+    prune:          bool  = True
+    motion:         str   = "sparse"
+    swap:           bool  = True      # edge-swap penalty via y-gadget
+    sa_full_sweeps: int   = 1000
+    sa_p_move:      float = 0.5
 
     # RRT* settings
     rrt_max_iter:  int   = 3000
@@ -96,6 +106,8 @@ class MultiRobotResult:
     paths:         list  = field(default_factory=list)
     solve_time:    float = 0.0
     energy:        float = float('inf')
+    D:             int   = 0
+    violations:    dict  = field(default_factory=dict)
 
 
 @dataclass
@@ -114,6 +126,11 @@ class BenchmarkEntry:
     qubo_n_success:  int
     qubo_time:       float
     qubo_energy:     float
+    qubo_D:          int   = 0
+    cbs_status:      str   = ""      # solved / infeasible / timeout
+    cbs_time:        float = 0.0
+    naive_astar_joint: bool = False  # manuscript's prioritized A* (see below)
+    qubo_violations: str   = ""
 
 
 # =============================================================================
@@ -192,10 +209,52 @@ class GridWorld:
 
 class PrioritizedAStarPlanner:
     """
-    Plans robots one by one in priority order.
-    Each robot treats cells occupied by higher-priority robots as obstacles.
-    This is the standard classical approach to multi-robot planning.
-    Limitation: early robots may block later ones, causing cascading failures.
+    Prioritized planning with space-time A* and a reservation table
+    (vertex + edge-swap reservations, goal held until T). Same horizon T and
+    conflict model as the QUBO. Incomplete: a failure does not prove the
+    instance is unsolvable — CBSPlanner is the oracle for that.
+    """
+
+    def __init__(self, world: "GridWorld"):
+        self.world = world
+
+    def plan(self) -> "MultiRobotResult":
+        from mapf_baselines import prioritized_planning
+        w   = self.world
+        res = prioritized_planning(
+            w.neighbors, w.N ** 2,
+            [w.rc_to_idx(*s) for s in w.starts],
+            [w.rc_to_idx(*g) for g in w.goals], w.cfg.T)
+        out = MultiRobotResult(method="Prioritized ST-A*")
+        out.paths = [[w.idx_to_rc(c) for c in p] if p else None
+                     for p in res.plans]
+        out.n_success     = res.n_success
+        out.joint_success = res.joint_success
+        out.solve_time    = res.solve_time
+        return out
+
+
+class CBSPlanner:
+    """Conflict-Based Search, horizon T. status: solved/infeasible/timeout."""
+
+    def __init__(self, world: "GridWorld", time_limit: float = 30.0):
+        self.world = world
+        self.time_limit = time_limit
+
+    def plan(self):
+        from mapf_baselines import cbs
+        w = self.world
+        return cbs(w.neighbors, w.N ** 2,
+                   [w.rc_to_idx(*s) for s in w.starts],
+                   [w.rc_to_idx(*g) for g in w.goals], w.cfg.T,
+                   time_limit=self.time_limit)
+
+
+class NaivePrioritizedAStarPlanner:
+    """
+    The manuscript's "Prioritized A*": each robot takes its static shortest
+    path and FAILS if that path touches a reserved (cell, t) — it never
+    waits or detours. Kept only to reproduce the submitted tables.
     """
 
     def __init__(self, world: GridWorld):
@@ -502,6 +561,8 @@ class JointQUBOPlanner:
         self.cfg   = cfg
 
     def plan(self, seed=42) -> MultiRobotResult:
+        if self.cfg.formulation != "legacy":
+            return self._plan_improved(seed)
         result = MultiRobotResult(method="Joint QUBO")
         t0     = time.perf_counter()
         cfg    = self.cfg
@@ -574,6 +635,35 @@ class JointQUBOPlanner:
         result.solve_time    = time.perf_counter() - t0
         return result
 
+    def _plan_improved(self, seed=42) -> MultiRobotResult:
+        import qubo_core as qc
+        result = MultiRobotResult(method="Joint QUBO")
+        t0  = time.perf_counter()
+        w, cfg = self.world, self.cfg
+        model = qc.build_from_world(
+            w, [w.rc_to_idx(*s) for s in w.starts],
+            [w.rc_to_idx(*g) for g in w.goals], cfg.T,
+            prune=cfg.prune, motion=cfg.motion, swap=cfg.swap)
+        result.D = model.D
+        if not model.feasible_layers:
+            result.violations = {"unreachable": 1}
+            result.paths = [None] * cfg.n_robots
+            result.solve_time = time.perf_counter() - t0
+            return result
+        ar  = qc.anneal(model, qc.AnnealParams(num_reads=cfg.sa_reads,
+                                               num_sweeps=cfg.sa_full_sweeps,
+                                               p_move=cfg.sa_p_move),
+                        seed=seed)
+        dec = qc.decode(model, ar.x)
+        result.energy        = ar.energy
+        result.paths         = [[w.idx_to_rc(c) for c in p] if p else None
+                                for p in dec.plans]
+        result.n_success     = sum(dec.robot_ok)
+        result.joint_success = dec.feasible
+        result.violations    = dict(dec.violations)
+        result.solve_time    = time.perf_counter() - t0
+        return result
+
 
 # =============================================================================
 # §6. PARALLEL TRIAL WORKER
@@ -581,7 +671,7 @@ class JointQUBOPlanner:
 
 def _run_trial(args):
     (N, n_robots, density, trial,
-     sa_reads, sa_sweeps, sa_T0, sa_Tf, rrt_iters) = args
+     sa_reads, sa_sweeps, sa_T0, sa_Tf, rrt_iters, qubo_opts) = args
 
     seed = abs(hash((N, n_robots, int(density*1000), trial))) % (2**31)
 
@@ -590,11 +680,14 @@ def _run_trial(args):
         sa_reads=sa_reads, sa_sweeps=sa_sweeps,
         sa_T0=sa_T0, sa_Tf=sa_Tf,
         rrt_max_iter=rrt_iters,
+        **qubo_opts,
     )
     world = GridWorld(cfg)
 
     ar = PrioritizedAStarPlanner(world).plan()
+    nr = NaivePrioritizedAStarPlanner(world).plan()
     rr = SequentialRRTStarPlanner(world).plan()
+    cr = CBSPlanner(world).plan()
     qr = JointQUBOPlanner(world, cfg).plan(seed=seed)
 
     return BenchmarkEntry(
@@ -609,6 +702,11 @@ def _run_trial(args):
         qubo_n_success=qr.n_success,
         qubo_time=qr.solve_time,
         qubo_energy=qr.energy,
+        qubo_D=qr.D,
+        cbs_status=cr.status,
+        cbs_time=cr.solve_time,
+        naive_astar_joint=nr.joint_success,
+        qubo_violations=";".join(f"{k}={v}" for k, v in qr.violations.items() if v),
     )
 
 
@@ -628,7 +726,8 @@ class BenchmarkSuite:
                  sa_Tf=0.001,
                  rrt_iters=3000,
                  n_workers=None,
-                 output_dir="."):
+                 output_dir=".",
+                 qubo_opts=None):
         self.grid_sizes  = grid_sizes
         self.robot_counts= robot_counts
         self.densities   = densities or np.linspace(0.05, 0.40, 8).tolist()
@@ -640,6 +739,7 @@ class BenchmarkSuite:
         self.rrt_iters   = rrt_iters
         self.n_workers   = n_workers or max(1, mp.cpu_count() - 1)
         self.output_dir  = output_dir
+        self.qubo_opts   = qubo_opts or {}
         self.entries     = []
 
     def run(self, verbose=True):
@@ -651,7 +751,7 @@ class BenchmarkSuite:
                         args.append((N, k, d, trial,
                                      self.sa_reads, self.sa_sweeps,
                                      self.sa_T0, self.sa_Tf,
-                                     self.rrt_iters))
+                                     self.rrt_iters, self.qubo_opts))
 
         total = len(args)
         print(f"Total trials  : {total}")
@@ -689,7 +789,9 @@ class BenchmarkSuite:
         fields = ["N","n_robots","obstacle_density","trial",
                   "astar_joint","astar_n_success","astar_time",
                   "rrt_joint","rrt_n_success","rrt_time",
-                  "qubo_joint","qubo_n_success","qubo_time","qubo_energy"]
+                  "qubo_joint","qubo_n_success","qubo_time","qubo_energy",
+                  "qubo_D","cbs_status","cbs_time","naive_astar_joint",
+                  "qubo_violations"]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
             w.writeheader()
@@ -708,6 +810,11 @@ class BenchmarkSuite:
                     "qubo_n_success": e.qubo_n_success,
                     "qubo_time": f"{e.qubo_time:.6f}",
                     "qubo_energy": f"{e.qubo_energy:.4f}",
+                    "qubo_D": e.qubo_D,
+                    "cbs_status": e.cbs_status,
+                    "cbs_time": f"{e.cbs_time:.6f}",
+                    "naive_astar_joint": int(e.naive_astar_joint),
+                    "qubo_violations": e.qubo_violations,
                 })
         print(f"CSV saved -> {path}")
 
@@ -722,6 +829,7 @@ def plot_results(entries, save_dir="."):
     C_A = '#1d4ed8'
     C_R = '#16a34a'
     C_Q = '#ea580c'
+    C_C = '#6b7280'
 
     grid_sizes   = sorted(set(e.N for e in entries))
     robot_counts = sorted(set(e.n_robots for e in entries))
@@ -737,6 +845,7 @@ def plot_results(entries, save_dir="."):
             if metric == "astar_joint":   vals.append(int(e.astar_joint))
             elif metric == "rrt_joint":   vals.append(int(e.rrt_joint))
             elif metric == "qubo_joint":  vals.append(int(e.qubo_joint))
+            elif metric == "cbs_joint":   vals.append(int(e.cbs_status == "solved"))
             elif metric == "astar_time":  vals.append(e.astar_time * 1000)
             elif metric == "rrt_time":    vals.append(e.rrt_time   * 1000)
             elif metric == "qubo_time":   vals.append(e.qubo_time  * 1000)
@@ -749,15 +858,16 @@ def plot_results(entries, save_dir="."):
         axes = [axes]
     fig.suptitle(
         "Fig 1 — Joint Mission Success Rate vs Number of Robots\n"
-        "Prioritized A* (blue)  |  Sequential RRT* (green)  |  Joint QUBO (orange)\n"
+        "Prioritized ST-A* (blue) | Sequential RRT* (green) | Joint QUBO (orange) | CBS (grey)\n"
         "(Joint success = ALL robots reach goals collision-free)",
         fontsize=12, fontweight='bold'
     )
     for ax, N in zip(axes, grid_sizes):
         for metric, color, marker, label in [
-            ("astar_joint", C_A, 'o', 'Prioritized A*'),
+            ("astar_joint", C_A, 'o', 'Prioritized ST-A*'),
             ("rrt_joint",   C_R, 's', 'Sequential RRT*'),
             ("qubo_joint",  C_Q, '^', 'Joint QUBO'),
+            ("cbs_joint",   C_C, 'D', 'CBS (complete)'),
         ]:
             sr = []
             for k in robot_counts:
@@ -801,9 +911,10 @@ def plot_results(entries, save_dir="."):
     N_plot = 7 if 7 in grid_sizes else grid_sizes[0]
     for ax, k in zip(axes, robot_counts):
         for metric, color, marker, label in [
-            ("astar_joint", C_A, 'o', 'Prioritized A*'),
+            ("astar_joint", C_A, 'o', 'Prioritized ST-A*'),
             ("rrt_joint",   C_R, 's', 'Sequential RRT*'),
             ("qubo_joint",  C_Q, '^', 'Joint QUBO'),
+            ("cbs_joint",   C_C, 'D', 'CBS (complete)'),
         ]:
             sr = [np.mean(get(entries, N_plot, k, d, metric))*100
                   if get(entries, N_plot, k, d, metric) else np.nan
@@ -868,9 +979,10 @@ def plot_results(entries, save_dir="."):
     d_plot = min(densities, key=lambda x: abs(x - 0.20))
     for ax, k in zip(axes, robot_counts):
         for metric, color, marker, label in [
-            ("astar_joint", C_A, 'o', 'Prioritized A*'),
+            ("astar_joint", C_A, 'o', 'Prioritized ST-A*'),
             ("rrt_joint",   C_R, 's', 'Sequential RRT*'),
             ("qubo_joint",  C_Q, '^', 'Joint QUBO'),
+            ("cbs_joint",   C_C, 'D', 'CBS (complete)'),
         ]:
             sr = [np.mean(get(entries, N, k, d_plot, metric))*100
                   if get(entries, N, k, d_plot, metric) else np.nan

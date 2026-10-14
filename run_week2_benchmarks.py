@@ -16,6 +16,11 @@ USAGE:
     python3 run_week2_benchmarks.py paper      # OVERNIGHT — single-robot, ~50,400 runs
     python3 run_week2_benchmarks.py multirobot_paper   # OVERNIGHT — extended to 8 robots
 
+Add --legacy to any mode to run the manuscript's original QUBO code path
+(dense, unpruned, single-bit SA). Without it the improved qubo_core model and
+annealer are used (pruned, sparse motion penalty, one-hot moves, strict
+decoder) and the multi-robot runs also record CBS as the oracle.
+
 Run 'check' first. Then run 'small' + 'multirobot_small' back to back
 (should fit in an afternoon) and LOOK AT THE FIGURES before committing to
 the overnight paper runs — this is where you catch a bad penalty weight
@@ -34,6 +39,14 @@ from qubo_path_planner import BenchmarkSuite as SingleRobotSuite, plot_results a
 from Multi_robot_qubo import BenchmarkSuite as MultiRobotSuite, plot_results as plot_multi
 
 
+LEGACY = "--legacy" in sys.argv
+# Improved annealer budget: sweeps are full sweeps of D proposals.
+QUBO_OPTS = {"formulation": "legacy"} if LEGACY else {
+    "formulation": "improved", "prune": True, "motion": "sparse",
+    "sa_full_sweeps": 1000, "sa_p_move": 0.5,
+}
+
+
 def _ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
@@ -46,7 +59,7 @@ def check():
     suite = SingleRobotSuite(
         grid_sizes=[5], densities=[0.0, 0.2, 0.4], corridor_widths=[2],
         n_trials=3, sa_reads=15, sa_sweeps=5000, rrt_max_iter=500,
-        output_dir="data/check_single",
+        output_dir="data/check_single", qubo_opts=QUBO_OPTS,
     )
     entries = suite.run(verbose=True)
     plot_single(entries, save_dir="data/check_single")
@@ -55,7 +68,7 @@ def check():
     suite2 = MultiRobotSuite(
         grid_sizes=[5], robot_counts=[2, 3, 5, 8], densities=[0.20],
         n_trials=3, sa_reads=15, sa_sweeps=5000, rrt_iters=500,
-        output_dir="data/check_multi",
+        output_dir="data/check_multi", qubo_opts=QUBO_OPTS,
     )
     entries2 = suite2.run(verbose=True)
     plot_multi(entries2, save_dir="data/check_multi")
@@ -70,7 +83,7 @@ def small():
         grid_sizes=[5, 7], densities=np.linspace(0.0, 0.50, 11).tolist(),
         corridor_widths=[1, 2, 3, 4], n_trials=15,
         sa_reads=200, sa_sweeps=60_000, rrt_max_iter=1000,
-        output_dir="data/single_small",
+        output_dir="data/single_small", qubo_opts=QUBO_OPTS,
     )
     entries = suite.run(verbose=True)
     plot_single(entries, save_dir="data/single_small")
@@ -83,7 +96,7 @@ def multirobot_small():
         grid_sizes=[5, 7], robot_counts=[2, 3, 4, 5, 6, 7, 8],
         densities=np.linspace(0.05, 0.40, 5).tolist(), n_trials=10,
         sa_reads=200, sa_sweeps=60_000, rrt_iters=1000,
-        output_dir="data/multi_small",
+        output_dir="data/multi_small", qubo_opts=QUBO_OPTS,
     )
     entries = suite.run(verbose=True)
     plot_multi(entries, save_dir="data/multi_small")
@@ -99,7 +112,8 @@ def paper():
     zone your calibration work identified.
 
     TIER 2 (N=15,20): deliberately CHEAP budget (30 reads/15k sweeps).
-    D=3,375 and D=8,000 here are far past the threshold — we WANT these
+    Legacy D = N^2 (4N-3) = 12,825 (N=15) and 30,800 (N=20) — NOT 3,375
+    and 8,000, which are N^3 (review item 28). These are far past the threshold — we WANT these
     to fail, to show classical SA becoming impractical at scale. Spending
     a large budget proving something we already expect to fail wastes
     machine time better spent elsewhere. If you want to double check this
@@ -116,7 +130,7 @@ def paper():
         corridor_widths=[1, 2, 3, 4], n_trials=100,  # increased: 50->100, real time budget available
         sa_reads=200, sa_sweeps=60_000, sa_T0=10.0, sa_Tf=0.001,
         rrt_max_iter=2000,
-        output_dir="data/single_paper",
+        output_dir="data/single_paper", qubo_opts=QUBO_OPTS,
     )
     entries1 = suite1.run(verbose=True)
 
@@ -127,7 +141,7 @@ def paper():
         corridor_widths=[1, 2, 3, 4], n_trials=100,  # increased: 50->100, cheap budget so this is fine
         sa_reads=30, sa_sweeps=15_000, sa_T0=10.0, sa_Tf=0.001,
         rrt_max_iter=2000,
-        output_dir="data/single_paper",
+        output_dir="data/single_paper", qubo_opts=QUBO_OPTS,
     )
     entries2 = suite2.run(verbose=True)
 
@@ -155,7 +169,7 @@ def multirobot_paper():
         densities=np.linspace(0.05, 0.40, 8).tolist(), n_trials=40,
         sa_reads=200, sa_sweeps=60_000, sa_T0=15.0, sa_Tf=0.001,
         rrt_iters=3000,
-        output_dir="data/multi_paper",
+        output_dir="data/multi_paper", qubo_opts=QUBO_OPTS,
     )
     entries = suite.run(verbose=True)
     plot_multi(entries, save_dir="data/multi_paper")
@@ -165,7 +179,8 @@ if __name__ == "__main__":
     import multiprocessing as mp
     mp.freeze_support()
 
-    mode = sys.argv[1] if len(sys.argv) > 1 else "check"
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    mode = args[0] if args else "check"
     t0 = time.time()
 
     {
