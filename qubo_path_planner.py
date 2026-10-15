@@ -84,9 +84,22 @@ class GridConfig:
 
     # SA solver settings — pure cold-start, never warm-started from A*
     sa_reads:  int   = 50
-    sa_sweeps: int   = 30_000
-    sa_T0:     float = 10.0
-    sa_Tf:     float = 0.001
+    sa_sweeps: int   = 30_000      # legacy only: single-bit proposals per read
+    sa_T0:     float = 10.0        # legacy only
+    sa_Tf:     float = 0.001       # legacy only
+
+    # QUBO formulation / annealer (see qubo_core.py)
+    #   "legacy"   : the manuscript's code path (dense Q, unpruned, single-bit
+    #                SA where one "sweep" is one flip). Kept for reproduction.
+    #                Known issues: reverse moves are free in the path cost,
+    #                quadratic terms are double-counted in the SA energy, and
+    #                the decoder accepts multi-hot / empty layers.
+    #   "improved" : qubo_core model + annealer, strict decoder.
+    formulation:    str   = "improved"
+    prune:          bool  = True      # drop cells unreachable by time t
+    motion:         str   = "sparse"  # "sparse" or "dense" motion penalty
+    sa_full_sweeps: int   = 1000      # improved only: sweeps of D proposals
+    sa_p_move:      float = 0.5       # improved only: one-hot move proposals
 
     # RRT* settings
     rrt_max_iter:    int   = 2000
@@ -109,6 +122,8 @@ class PlannerResult:
     path_cost:  float = float('inf')
     solve_time: float = 0.0
     energy:     float = float('inf')
+    D:          int   = 0
+    violations: dict  = field(default_factory=dict)
 
 
 @dataclass
@@ -128,6 +143,9 @@ class BenchmarkEntry:
     qubo_cost:        float
     qubo_time:        float
     qubo_energy:      float
+    qubo_D:           int   = 0
+    qubo_ref_energy:  float = float('inf')   # energy of the A* plan in this QUBO
+    qubo_violations:  str   = ""
 
 
 # =============================================================================
@@ -552,6 +570,32 @@ class QUBODecoder:
             )
         return path
 
+    def validate_strict(self, x: np.ndarray) -> tuple:
+        """
+        Every layer exactly one-hot, start at t=0, goal at t=T, no obstacles,
+        every step a wait or a 4-neighbour move. The lenient validate() below
+        is what the manuscript used; it skips empty layers and takes argmax
+        of multi-hot layers, so it can accept infeasible bitstrings.
+        """
+        cells = []
+        for t in range(self.cfg.T + 1):
+            seg = x[t*self.N2:(t+1)*self.N2]
+            on = np.nonzero(seg > 0.5)[0]
+            if len(on) != 1:
+                return False, float('inf')
+            cells.append(int(on[0]))
+        if cells[0] != self.world.start_idx or cells[-1] != self.world.goal_idx:
+            return False, float('inf')
+        cost = 0
+        for a, b in zip(cells, cells[1:]):
+            if a in self.world.obstacles or b in self.world.obstacles:
+                return False, float('inf')
+            if a != b:
+                if b not in self.world.neighbors.get(a, []):
+                    return False, float('inf')
+                cost += 1
+        return True, cost
+
     def validate(self, path: list) -> tuple:
         steps = [(i,c) for i,c in enumerate(path) if c is not None]
         if not steps:
@@ -583,17 +627,60 @@ class QUBOPlanner:
         self.world = world
         self.cfg   = cfg
 
-    def plan(self, seed: int = 42) -> PlannerResult:
+    def plan(self, seed: int = 42, ref_path: Optional[list] = None) -> PlannerResult:
+        """
+        ref_path: optional known feasible cell path (e.g. from A*). Its energy
+        in the same QUBO is recorded in result.violations["ref_energy"] so a
+        failed run can be classified as a search failure (SA energy above the
+        reference) or a model error (infeasible state below it).
+        """
+        if self.cfg.formulation == "legacy":
+            return self._plan_legacy(seed)
+        import qubo_core as qc
+        result = PlannerResult(method="QUBO")
+        t0     = time.perf_counter()
+        w      = self.world
+        model  = qc.build_from_world(w, [w.start_idx], [w.goal_idx], self.cfg.T,
+                                     prune=self.cfg.prune, motion=self.cfg.motion)
+        result.D = model.D
+        if not model.feasible_layers:
+            # goal not reachable within T: the pruned model is empty
+            result.solve_time = time.perf_counter() - t0
+            result.violations = {"unreachable": 1}
+            return result
+        ar = qc.anneal(model, qc.AnnealParams(num_reads=self.cfg.sa_reads,
+                                              num_sweeps=self.cfg.sa_full_sweeps,
+                                              p_move=self.cfg.sa_p_move),
+                       seed=seed)
+        dec = qc.decode(model, ar.x)
+        result.energy     = ar.energy
+        result.success    = dec.feasible
+        result.path_cost  = dec.cost
+        result.violations = dict(dec.violations)
+        if dec.feasible:
+            result.path = [w.idx_to_rc(c) for c in dec.plans[0]]
+        if ref_path is not None:
+            p = qc.pad_path([w.rc_to_idx(*rc) for rc in ref_path], self.cfg.T)
+            xr = qc.encode_plan(model, [p]) if p is not None else None
+            if xr is not None:
+                result.violations["ref_energy"] = model.energy(xr)
+        result.solve_time = time.perf_counter() - t0
+        return result
+
+    def _plan_legacy(self, seed: int = 42) -> PlannerResult:
         result = PlannerResult(method="QUBO")
         t0     = time.perf_counter()
         Q      = QUBOBuilder(self.world, self.cfg).build()
+        result.D = Q.shape[0]
         x, E   = solve_qubo_sa(Q, self.cfg, seed=seed)
         result.energy = E
         dec           = QUBODecoder(self.world, self.cfg)
         path          = dec.decode(x)
-        valid, cost   = dec.validate(path)
+        lenient, _    = dec.validate(path)
+        valid, cost   = dec.validate_strict(x)
         result.success    = valid
-        result.path       = [c for c in path if c is not None]
+        result.violations = {"lenient_success": int(lenient)}
+        result.path       = [c for c in path if c is not None] if valid else []
         result.path_cost  = cost
         result.solve_time = time.perf_counter() - t0
         return result
@@ -607,7 +694,7 @@ def _run_trial(args: tuple) -> BenchmarkEntry:
     """Top-level worker — must be module-level for multiprocessing pickling."""
     (N, T, density, env_type, corridor_width, trial,
      sa_reads, sa_sweeps, sa_T0, sa_Tf,
-     rrt_max_iter, rrt_step_size) = args
+     rrt_max_iter, rrt_step_size, qubo_opts) = args
 
     seed = abs(hash((N, env_type, int(density*1000),
                      corridor_width, trial))) % (2**31)
@@ -624,12 +711,16 @@ def _run_trial(args: tuple) -> BenchmarkEntry:
         sa_Tf=sa_Tf,
         rrt_max_iter=rrt_max_iter,
         rrt_step_size=rrt_step_size,
+        **qubo_opts,
     )
     world = GridWorld(cfg)
 
     ar  = AStarPlanner(world).plan()
     rr  = RRTStarPlanner(world).plan()
-    qr  = QUBOPlanner(world, cfg).plan(seed=seed)
+    qr  = QUBOPlanner(world, cfg).plan(seed=seed,
+                                       ref_path=ar.path if ar.success else None)
+    viol = dict(qr.violations)
+    ref_e = viol.pop("ref_energy", float('inf'))
 
     return BenchmarkEntry(
         N=N,
@@ -647,6 +738,9 @@ def _run_trial(args: tuple) -> BenchmarkEntry:
         qubo_cost=qr.path_cost,
         qubo_time=qr.solve_time,
         qubo_energy=qr.energy,
+        qubo_D=qr.D,
+        qubo_ref_energy=ref_e,
+        qubo_violations=";".join(f"{k}={v}" for k, v in viol.items() if v),
     )
 
 
@@ -677,7 +771,8 @@ class BenchmarkSuite:
                  rrt_max_iter:   int         = 2000,
                  rrt_step_size:  float       = 1.5,
                  n_workers:      int         = None,
-                 output_dir:     str         = "."):
+                 output_dir:     str         = ".",
+                 qubo_opts:      dict        = None):
 
         self.grid_sizes      = grid_sizes      or [5, 7, 10]
         self.densities       = densities       or np.linspace(0.0, 0.50, 21).tolist()
@@ -691,6 +786,9 @@ class BenchmarkSuite:
         self.rrt_step_size   = rrt_step_size
         self.n_workers       = n_workers or max(1, mp.cpu_count() - 1)
         self.output_dir      = output_dir
+        # forwarded to GridConfig: formulation, prune, motion,
+        # sa_full_sweeps, sa_p_move
+        self.qubo_opts       = qubo_opts or {}
         self.entries: List[BenchmarkEntry] = []
 
     def _build_args(self) -> list:
@@ -705,6 +803,7 @@ class BenchmarkSuite:
                         self.sa_reads, self.sa_sweeps,
                         self.sa_T0, self.sa_Tf,
                         self.rrt_max_iter, self.rrt_step_size,
+                        self.qubo_opts,
                     ))
         # Corridor environments (fixed density 10%, vary corridor width)
         for N in self.grid_sizes:
@@ -716,6 +815,7 @@ class BenchmarkSuite:
                         self.sa_reads, self.sa_sweeps,
                         self.sa_T0, self.sa_Tf,
                         self.rrt_max_iter, self.rrt_step_size,
+                        self.qubo_opts,
                     ))
         return args
 
@@ -734,8 +834,13 @@ class BenchmarkSuite:
               f"({self.densities[0]:.0%} -> {self.densities[-1]:.0%})")
         print(f"Corridor widths: {self.corridor_widths}")
         print(f"Trials/config  : {self.n_trials}")
-        print(f"SA config      : {self.sa_reads} reads x "
-              f"{self.sa_sweeps} sweeps  T0={self.sa_T0}  Tf={self.sa_Tf}")
+        if self.qubo_opts.get("formulation", "improved") == "legacy":
+            print(f"SA config      : legacy, {self.sa_reads} reads x "
+                  f"{self.sa_sweeps} flips  T0={self.sa_T0}  Tf={self.sa_Tf}")
+        else:
+            print(f"SA config      : {self.sa_reads} reads x "
+                  f"{self.qubo_opts.get('sa_full_sweeps', 1000)} sweeps of D "
+                  f"proposals  opts={self.qubo_opts}")
         print(f"RRT* iters     : {self.rrt_max_iter}")
         print(f"Workers        : {self.n_workers}\n")
 
@@ -768,6 +873,7 @@ class BenchmarkSuite:
             "astar_success",   "astar_cost",   "astar_time",
             "rrtstar_success", "rrtstar_cost", "rrtstar_time",
             "qubo_success",    "qubo_cost",    "qubo_time", "qubo_energy",
+            "qubo_D", "qubo_ref_energy", "qubo_violations",
         ]
         with open(path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
@@ -789,6 +895,9 @@ class BenchmarkSuite:
                     "qubo_cost":       f"{e.qubo_cost:.4f}"    if e.qubo_cost    < 1e9 else "inf",
                     "qubo_time":       f"{e.qubo_time:.6f}",
                     "qubo_energy":     f"{e.qubo_energy:.4f}",
+                    "qubo_D":          e.qubo_D,
+                    "qubo_ref_energy": f"{e.qubo_ref_energy:.4f}" if e.qubo_ref_energy < 1e9 else "",
+                    "qubo_violations": e.qubo_violations,
                 })
         print(f"CSV saved  -> {path}")
 
@@ -1024,9 +1133,11 @@ def plot_results(entries: list, save_dir: str = "."):
         ax.semilogy(grid_sizes, means, f'-{marker}', color=color,
                     lw=2.5, ms=9, label=label)
 
-    # Annotate QUBO dimension D = N^2*(T+1)
+    # Annotate QUBO dimension: the D actually built (pruned models vary per
+    # instance, so report the median); legacy D = N^2*(T+1)
     for N in grid_sizes:
-        D = N**2 * (4*(N-1) + 1)
+        Ds = [e.qubo_D for e in random_entries if e.N == N and e.qubo_D]
+        D = int(np.median(Ds)) if Ds else N**2 * (4*(N-1) + 1)
         qt = []
         for d in densities:
             qt.extend(agg_random("time", N, d, "qubo"))

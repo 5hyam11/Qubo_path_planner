@@ -49,10 +49,19 @@ import networkx as nx
 from Multi_robot_qubo import (
     GridWorld,
     MultiRobotConfig,
+    NaivePrioritizedAStarPlanner,
     PrioritizedAStarPlanner,
     SequentialRRTStarPlanner,
     MultiRobotResult,
+    CBSPlanner,
 )
+
+# NOTE (review item 30): Type-B below only says "a solo path existed and
+# earlier reservations blocked it". That is not the same event as a cascade
+# in Definition 1 ("sequential failure although a joint plan exists"). Each
+# row therefore also records the CBS status for the same instance; count a
+# cascade only where cbs_status == "solved" and the planner failed
+# (column true_cascade).
 
 
 class FailureType(Enum):
@@ -87,7 +96,7 @@ class InstrumentedResult(MultiRobotResult):
 # Instrumented Prioritized A*
 # =============================================================================
 
-class InstrumentedPrioritizedAStar(PrioritizedAStarPlanner):
+class InstrumentedPrioritizedAStar(NaivePrioritizedAStarPlanner):
     """
     Drop-in replacement for PrioritizedAStarPlanner that classifies each
     robot's failure instead of collapsing everything to None.
@@ -252,6 +261,8 @@ class CascadeBenchmarkEntry:
     type_b_count: int
     type_c_count: int
     solve_time_ms: float
+    cbs_status: str = ""
+    true_cascade: bool = False
 
 
 class CascadeFailureBenchmark:
@@ -272,7 +283,7 @@ class CascadeFailureBenchmark:
 
     def run(self, verbose=True):
         os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
-        total = len(self.grid_sizes) * len(self.robot_counts) * self.n_trials * 2
+        total = len(self.grid_sizes) * len(self.robot_counts) * self.n_trials * 3
         done = 0
 
         for N in self.grid_sizes:
@@ -285,9 +296,11 @@ class CascadeFailureBenchmark:
                         rrt_max_iter=3000,
                     )
                     world = GridWorld(cfg)
+                    cbs_res = CBSPlanner(world).plan()
 
                     for planner_cls, name in [
-                        (InstrumentedPrioritizedAStar, "prioritized_astar"),
+                        (InstrumentedPrioritizedAStar, "naive_prioritized_astar"),
+                        (PrioritizedAStarPlanner, "prioritized_st_astar"),
                         (InstrumentedSequentialRRTStar, "sequential_rrt_star"),
                     ]:
                         planner = planner_cls(world)
@@ -298,10 +311,13 @@ class CascadeFailureBenchmark:
                             trial=trial, planner_name=name,
                             joint_success=res.joint_success,
                             n_success=res.n_success,
-                            type_a_count=res.type_a_count,
-                            type_b_count=res.type_b_count,
-                            type_c_count=res.type_c_count,
+                            type_a_count=getattr(res, "type_a_count", 0),
+                            type_b_count=getattr(res, "type_b_count", 0),
+                            type_c_count=getattr(res, "type_c_count", 0),
                             solve_time_ms=res.solve_time * 1000.0,
+                            cbs_status=cbs_res.status,
+                            true_cascade=(cbs_res.status == "solved"
+                                          and not res.joint_success),
                         ))
                         done += 1
 
@@ -324,22 +340,28 @@ class CascadeFailureBenchmark:
 
     def _print_summary(self):
         """Cascade rate vs robot count — sanity check before plotting Figure 5."""
-        agg = defaultdict(lambda: defaultdict(lambda: {"trials": 0, "type_b": 0, "fail": 0}))
+        agg = defaultdict(lambda: defaultdict(lambda: {"trials": 0, "type_b": 0, "fail": 0,
+                                                       "cbs_solved": 0, "cascade": 0}))
         for e in self.entries:
             d = agg[e.planner_name][e.n_robots]
             d["trials"] += 1
             d["type_b"] += e.type_b_count
             d["fail"] += (0 if e.joint_success else 1)
+            d["cbs_solved"] += int(e.cbs_status == "solved")
+            d["cascade"] += int(e.true_cascade)
 
         for planner_name in agg:
             print(f"\n{planner_name}")
-            print(f"{'robots':>7} | {'trials':>7} | {'fail_rate':>10} | {'type_b/robot':>13}")
-            print("-" * 48)
+            print(f"{'robots':>7} | {'trials':>7} | {'fail_rate':>10} | {'type_b/robot':>13} "
+                  f"| {'CBS solved':>10} | {'cascade|solvable':>16}")
+            print("-" * 80)
             for k in sorted(agg[planner_name]):
                 d = agg[planner_name][k]
                 fail_rate = d["fail"] / d["trials"]
                 type_b_rate = d["type_b"] / (d["trials"] * k)
-                print(f"{k:>7} | {d['trials']:>7} | {fail_rate:>10.1%} | {type_b_rate:>13.1%}")
+                casc = d["cascade"] / d["cbs_solved"] if d["cbs_solved"] else float("nan")
+                print(f"{k:>7} | {d['trials']:>7} | {fail_rate:>10.1%} | {type_b_rate:>13.1%} "
+                      f"| {d['cbs_solved']:>10} | {casc:>16.1%}")
 
 
 # =============================================================================

@@ -20,37 +20,135 @@ Three planners are evaluated:
 
 ```
 Qubo_path_planner/
-│
+├── qubo_core.py              # Pruned space-time QUBO (sparse/dense motion term,
+│                             # edge-swap gadget), annealer with one-hot moves,
+│                             # strict decoder, exact checks for small instances
+├── mapf_baselines.py         # Space-time A*, prioritized planning with a
+│                             # reservation table, CBS (solved/infeasible/timeout)
 ├── qubo_path_planner.py      # Single-robot benchmark: A* vs RRT* vs QUBO
-│                              # 135,000+ trials across 3 grid sizes,
-│                              # 21 obstacle densities, corridor environments
-│
-├── multi_robot_qubo.py       # Multi-robot benchmark: joint vs sequential planning
-│                              # Tests 2, 3, 4 robots across 5x5, 7x7, 10x10 grids
-│
-├── qubo.py                   # Standalone QUBO formulation reference
-│
-└── README.md
+├── Multi_robot_qubo.py       # Multi-robot benchmark: QUBO vs prioritized ST-A*,
+│                             # sequential RRT*, CBS
+├── diagnose_cliff.py         # Ablation that explains the D ~ 425-756 "cliff"
+├── calibrate_sa_budget.py    # Full reads x sweeps budget grid
+├── deadlock_analyzer.py      # Failure classification, now with the CBS oracle
+├── run_week2_benchmarks.py   # Paper-scale runs (add --legacy for the old code path)
+├── tests/test_core.py        # python -m pytest tests -q
+└── results/                  # Diagnostic CSVs + markdown tables
 ```
 
 ---
 
-## Key Research Findings
+## Review response (October 2026)
 
-### Single-Robot Planning
-- QUBO correctly encodes all 5 constraint terms in a unified energy function
-- Classical SA solver becomes insufficient beyond **D ≈ 425 binary variables**
-- A* solves in **~0.05ms**, QUBO requires **~5,000ms** — 4 orders of magnitude slower on classical hardware
-- RRT* finds shorter paths than A* at low densities but degrades faster at high obstacle density
+The manuscript reported that cold-start SA on this QUBO solves 35/50 empty
+5x5 grids (D = 425) and 0% at D >= 756. The review asked whether that cliff
+comes from the model or from the search. The diagnostic in
+`diagnose_cliff.py` answers that question.
 
-### Multi-Robot Planning  
-- QUBO's joint formulation encodes inter-robot collision avoidance in a **single P6 penalty term**
-- Sequential classical planners (Prioritized A*, Sequential RRT*) show cascading failure as robot count increases
-- RRT* joint success drops from **70% → 7%** as robots scale from 2 → 4
-- Results establish a concrete threshold where **quantum annealing hardware becomes necessary**
+### Bugs found in the manuscript code path (`formulation="legacy"`)
 
-### Core Thesis
-> The QUBO formulation is mathematically superior for joint multi-constraint planning. The bottleneck is the classical SA solver, not the formulation itself — establishing a clear, empirically grounded case for quantum annealing hardware deployment in robotics.
+1. **Reverse moves were free.** The path-cost loop added each undirected
+   grid edge once, as (u, t) -> (v, t+1), so moving v -> u cost nothing.
+2. **The SA energy double-counted quadratic terms.** `x @ Qsym @ x` with
+   `Qsym = Q + Q.T - diag(Q)` counts every off-diagonal coupling twice
+   relative to the upper-triangular Q, and the constant offset of the
+   squared penalties was dropped (hence the negative energies in the paper).
+3. **The decoder was lenient.** It skipped empty layers and took the argmax of
+   multi-hot layers, so it could accept infeasible bitstrings.
+   `validate_strict` is now used everywhere.
+4. **The multi-robot model had no edge-swap term** and summed P6 over
+   ordered robot pairs (weight 2·P6).
+5. **"Prioritized A\*" never waited or detoured.** It took each robot's
+   static shortest path and failed on any reserved (cell, t). It is kept as
+   `NaivePrioritizedAStarPlanner`; `PrioritizedAStarPlanner` is now
+   space-time A\* with a reservation table and the same horizon T.
+
+The legacy path is unchanged apart from the strict decoder, so the manuscript
+numbers can still be reproduced (`--legacy`).
+
+### What changed in the model and the annealer
+
+* Constant offset kept: a feasible plan has energy = number of moves.
+* **Pruning:** a variable (c, t) exists only if c is free,
+  dist(start, c) <= t and dist(c, goal) <= T - t. Every feasible plan uses
+  only these variables, so the feasible set is unchanged.
+* **Sparse motion penalty:** P5·x[i,t]·(1 - sum over legal next cells of x[j,t+1])
+  instead of penalising every illegal pair.
+* **Penalties scaled to the horizon** (P5 > T, P1 > 2·P5 + T, the rest > T) so
+  no violation can pay for itself. The tests check this by exhaustive
+  enumeration on small instances, and by using the annealer as an adversary
+  on random 1-3 robot instances.
+* **Annealer:** one sweep = D proposals. Half are one-hot moves (relocate a
+  robot within a time layer in one step, so the chain never pays the P1
+  barrier). Temperatures are measured from the ΔE distribution. Numba
+  kernel.
+* **Edge swaps** via an auxiliary-variable gadget, so the quartic swap term
+  becomes quadratic.
+
+### Single robot, empty N x N grid, T = 4(N-1), n = 100 per row
+
+Overnight run, 14 Oct 2026 (`results/overnight_2026_10_14/`; the n = 50
+cloud run in `results/` agrees). Variants change one thing at a time.
+`fixed_flip` is the manuscript's model with bugs 1-2 fixed, annealed with
+single-bit flips only, at 1000 proposals per variable per read (about 7x the
+manuscript's 141 at D = 425).
+
+
+**Reading:**
+
+* With single-bit flips the cliff reproduces: 72% at D = 425, 7% at D = 756,
+  0% from D = 1,225 up to D = 3,700.
+* There are zero model errors in 3,200 runs. Every failed run ends above the
+  energy of the A\* plan with a motion violation, so the search fails and
+  the model does not.
+* Adding one-hot moves alone gives 100/100 at every size up to 10x10
+  (D = 3,700), on the same unpruned model.
+* The cliff is a property of single-bit-flip annealing on a one-hot
+  encoding (each feasible move has to cross a P1 barrier), not of the QUBO
+  and not of D.
+* Pruning halves D. The sparse motion term cuts the maximum degree by about
+  3x and the coefficient range from about 200:1 to about 6:1, which matters
+  for hardware embedding.
+
+### Multi-robot, 7x7 (and smaller) at 20% obstacles, T = 4(N-1), n = 50 per row
+
+Overnight run, 14 Oct 2026. CBS has a 20 s limit per instance.
+
+
+**Reading:**
+
+* The joint QUBO has the highest success, or ties for it, at every k. At
+  k = 5 it solves 50/50, against prioritized space-time A\* 46/50, CBS within
+  20 s 37/50, and the manuscript's naive prioritized A\* 28/50.
+* At k = 4, 5 and 6, CBS hit its time limit on 9, 13 and at least 14
+  instances that the QUBO solved.
+* Below k = 4 every planner except naive PP solves the same instances. The
+  failures at k = 2-3 are instances CBS proves infeasible within T.
+* The QUBO is **not** always optimal at k >= 4: it matches the CBS optimum on
+  34/41, 33/37 and 31/35 of the CBS-solved instances.
+* The manuscript's "cascade" comes mostly from the naive prioritized
+  planner. A correct prioritized space-time A\* loses only 3-6 instances per
+  50 to the QUBO at k = 4-6.
+* **Wall-clock time:** the QUBO takes minutes per instance at k >= 4. CBS and
+  prioritized A\* take milliseconds to seconds. The QUBO pruned D is larger
+  than the legacy D here only because of the swap-gadget auxiliary
+  variables.
+
+### Claims these results do and do not support
+
+* Supported: the space-time QUBO encodes grid MAPF correctly (vertex +
+  swap conflicts, verified ground state on small instances). A suitably
+  designed classical annealer solves it reliably: single robot up to 10x10,
+  and 7x7 with up to 6 robots, where it found joint plans more often than
+  prioritized A\* or CBS (20 s limit).
+* **Not** supported: "classical SA is insufficient beyond D ≈ 425" or "quantum
+  hardware becomes necessary". The cliff disappears with a better move set
+  on the same classical hardware.
+* **Not** supported: "QUBO beats classical planners" without qualification.
+  It wins on success rate at k >= 4 under these time limits, but CBS and
+  prioritized space-time A\* are orders of magnitude faster, and CBS is
+  optimal whenever it finishes. State the success rate and the wall-clock
+  time together.
 
 ---
 
@@ -62,7 +160,7 @@ git clone https://github.com/5hyam11/Qubo_path_planner.git
 cd Qubo_path_planner
 
 # Install dependencies
-pip install numpy networkx matplotlib dwave-neal
+pip install numpy networkx matplotlib numba pytest
 ```
 
 ---
@@ -80,6 +178,14 @@ python3 qubo_path_planner.py small
 
 # Full paper benchmark — 135,000+ runs, overnight
 caffeinate -i python3 qubo_path_planner.py paper
+```
+
+### Diagnostics (review response)
+
+```bash
+python3 -m pytest tests -q
+python3 diagnose_cliff.py single --trials 50
+python3 diagnose_cliff.py multi  --trials 30 --density 0.2
 ```
 
 ### Multi-Robot Benchmark
@@ -135,7 +241,8 @@ This penalises any two robots occupying the same cell at the same timestep — e
 ### Variable Indexing (Time-Major)
 ```
 k(i, t) = t * N² + i,  where i = row * N + col
-Total variables D = N² × (T+1)
+Total variables D = N² × (T+1) = N²(4N-3)   (legacy, unpruned)
+# e.g. 5x5: 425, 6x6: 756, 7x7: 1,225, 10x10: 3,700, 15x15: 12,825, 20x20: 30,800
 ```
 
 ### Penalty Weight Guidelines
@@ -166,8 +273,9 @@ Total variables D = N² × (T+1)
 
 ## Limitations & Future Work
 
-- Classical SA is insufficient as a QUBO solver beyond D ≈ 425 variables
-- Deployment on **D-Wave Advantage** quantum annealing hardware is the identified next step
+- Single-bit-flip SA fails on this encoding beyond D ≈ 425; one-hot moves remove that limit (see Review response)
+- The improved annealer is slower than CBS / prioritized space-time A* by orders of magnitude on these instances
+- Not yet compared: tabu search, parallel tempering, Gurobi/CP-SAT, MovingAI benchmark maps, D-Wave hardware (which would need minor embedding of the one-hot cliques)
 - Future work: hybrid classical-quantum solvers, continuous configuration spaces, dynamic environments
 
 ---
