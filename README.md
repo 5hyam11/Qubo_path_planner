@@ -85,90 +85,70 @@ numbers can still be reproduced (`--legacy`).
 * **Edge swaps** via an auxiliary-variable gadget, so the quartic swap term
   becomes quadratic.
 
-### Single robot, empty N x N grid, T = 4(N-1), n = 50 per row
+### Single robot, empty N x N grid, T = 4(N-1), n = 100 per row
 
-Variants change one thing at a time. `fixed_flip` is the manuscript's model
-with bugs 1-2 fixed, annealed with single-bit flips only, at 1000 proposals
-per variable per read (about 7x the manuscript's 141 at D = 425).
+Overnight run, 14 Oct 2026 (`results/overnight_2026_10_14/`; the n = 50
+cloud run in `results/` agrees). Variants change one thing at a time.
+`fixed_flip` is the manuscript's model with bugs 1-2 fixed, annealed with
+single-bit flips only, at 1000 proposals per variable per read (about 7x the
+manuscript's 141 at D = 425).
 
-| N | variant | D | max_degree | coeff_range | proposals_per_var_per_read | n | success | 95% CI | model errors | median E_SA - E_A* | violations (best state, summed) |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2 | fixed_flip | 20 | 9 | 165.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 2 | fixed_move | 20 | 9 | 165.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 2 | pruned_move | 12 | 8 | 165.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 2 | sparse_move | 12 | 8 | 5.7 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 3 | fixed_flip | 81 | 24 | 169.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 3 | fixed_move | 81 | 24 | 169.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 3 | pruned_move | 45 | 23 | 169.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 3 | sparse_move | 45 | 18 | 5.8 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 4 | fixed_flip | 208 | 45 | 173.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 4 | fixed_move | 208 | 45 | 173.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 4 | pruned_move | 112 | 44 | 173.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 4 | sparse_move | 112 | 25 | 6.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 5 | fixed_flip | 425 | 72 | 177.0 | 1000 | 50 | 37/50 | [60.4%, 84.1%] | 0 | 1.0 | motion=13 |
-| 5 | fixed_move | 425 | 72 | 177.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 5 | pruned_move | 225 | 71 | 177.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 5 | sparse_move | 225 | 34 | 6.1 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 6 | fixed_flip | 756 | 105 | 181.0 | 1000 | 50 | 1/50 | [0.4%, 10.5%] | 0 | 20.0 | motion=49 |
-| 6 | fixed_move | 756 | 105 | 181.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 6 | pruned_move | 396 | 104 | 181.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 6 | sparse_move | 396 | 45 | 6.2 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 7 | fixed_flip | 1225 | 144 | 185.0 | 1000 | 50 | 0/50 | [0.0%, 7.1%] | 0 | 18.0 | motion=50 |
-| 7 | fixed_move | 1225 | 144 | 185.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 7 | pruned_move | 637 | 143 | 185.0 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-| 7 | sparse_move | 637 | 58 | 6.4 | 1000 | 50 | 50/50 | [92.9%, 100.0%] | 0 | 0.0 | - |
-
-**Reading:** with single-bit flips the cliff reproduces: 74% at D = 425, 2%
-at D = 756, 0% at D = 1,225. There are zero model errors. Every failed run
-ends above the energy of the A\* plan, with a motion violation, so the
-search fails and the model does not. Adding one-hot moves alone gives 50/50
-at every size, on the same unpruned model. The cliff is a property of
-single-bit-flip annealing on a one-hot encoding (each feasible move has to
-cross a P1 barrier), not of the QUBO and not of D.
-
-### Multi-robot, N x N at 20% obstacles, T = 4(N-1), n = 20 per row
-
-| N | k | legacy D | QUBO D (median) | n | CBS solved | Prioritized ST-A* | naive PP (manuscript) | Joint QUBO | QUBO = CBS optimum |
-|---|---|---|---|---|---|---|---|---|---|
-| 3 | 2 | 162 | 240 | 20 | 20 | 20/20 [84%, 100%] | 20/20 [84%, 100%] | 20/20 [84%, 100%] | 20/20 [84%, 100%] |
-| 4 | 2 | 416 | 567 | 20 | 20 | 20/20 [84%, 100%] | 17/20 [64%, 95%] | 20/20 [84%, 100%] | 20/20 [84%, 100%] |
-| 5 | 2 | 850 | 1135 | 20 | 20 | 20/20 [84%, 100%] | 14/20 [48%, 85%] | 20/20 [84%, 100%] | 20/20 [84%, 100%] |
-| 5 | 3 | 1275 | 2107 | 20 | 19 | 19/20 [76%, 99%] | 17/20 [64%, 95%] | 20/20 [84%, 100%] | 19/19 [83%, 100%] |
-| 7 | 2 | 2450 | 3302 | 20 | 17 | 17/20 [64%, 95%] | 17/20 [64%, 95%] | 17/20 [64%, 95%] | 17/17 [82%, 100%] |
-| 7 | 3 | 3675 | 5577 | 20 | 17 | 17/20 [64%, 95%] | 11/20 [34%, 74%] | 17/20 [64%, 95%] | 17/17 [82%, 100%] |
-| 7 | 4 | 4900 | 7928 | 20 | 16 | 18/20 [70%, 97%] | 16/20 [58%, 92%] | 20/20 [84%, 100%] | 11/16 [44%, 86%] |
-| 7 | 6 | 7350 | 12861 | 20 | 15 | 19/20 [76%, 99%] | 8/20 [22%, 61%] | 19/20 [76%, 99%] | 13/15 [62%, 96%] |
-
-Success columns are over all n instances; intervals are Wilson 95% for that n. 'QUBO = CBS optimum' is over CBS-solved instances.
 
 **Reading:**
 
-* Every QUBO failure is either an instance CBS proves infeasible within T
-  (the pruned model is empty and is reported as `unreachable`), or one CBS
-  timeout at k = 6.
-* At 7x7 with k = 4, the QUBO solved all 20 instances, including the 4 where
-  CBS hit its 20 s limit.
-* The QUBO is **not** always optimal at k >= 4: it matched the CBS optimum on
-  11/16 and 13/15 of the CBS-solved instances.
-* Prioritized space-time A\* is as good or nearly as good on these maps. The
-  manuscript's "cascade" mostly came from the naive prioritized planner and
-  from sequential RRT\*.
-* **Wall-clock time:** the QUBO median is 131 s (k = 4) and 258 s (k = 6) on
-  4 cores; CBS and prioritized A\* take milliseconds to seconds. The QUBO
-  pruned D is larger than the legacy D here only because of the swap-gadget
-  auxiliary variables.
+* With single-bit flips the cliff reproduces: 72% at D = 425, 7% at D = 756,
+  0% from D = 1,225 up to D = 3,700.
+* There are zero model errors in 3,200 runs. Every failed run ends above the
+  energy of the A\* plan with a motion violation, so the search fails and
+  the model does not.
+* Adding one-hot moves alone gives 100/100 at every size up to 10x10
+  (D = 3,700), on the same unpruned model.
+* The cliff is a property of single-bit-flip annealing on a one-hot
+  encoding (each feasible move has to cross a P1 barrier), not of the QUBO
+  and not of D.
+* Pruning halves D. The sparse motion term cuts the maximum degree by about
+  3x and the coefficient range from about 200:1 to about 6:1, which matters
+  for hardware embedding.
+
+### Multi-robot, 7x7 (and smaller) at 20% obstacles, T = 4(N-1), n = 50 per row
+
+Overnight run, 14 Oct 2026. CBS has a 20 s limit per instance.
+
+
+**Reading:**
+
+* The joint QUBO has the highest success, or ties for it, at every k. At
+  k = 5 it solves 50/50, against prioritized space-time A\* 46/50, CBS within
+  20 s 37/50, and the manuscript's naive prioritized A\* 28/50.
+* At k = 4, 5 and 6, CBS hit its time limit on 9, 13 and at least 14
+  instances that the QUBO solved.
+* Below k = 4 every planner except naive PP solves the same instances. The
+  failures at k = 2-3 are instances CBS proves infeasible within T.
+* The QUBO is **not** always optimal at k >= 4: it matches the CBS optimum on
+  34/41, 33/37 and 31/35 of the CBS-solved instances.
+* The manuscript's "cascade" comes mostly from the naive prioritized
+  planner. A correct prioritized space-time A\* loses only 3-6 instances per
+  50 to the QUBO at k = 4-6.
+* **Wall-clock time:** the QUBO takes minutes per instance at k >= 4. CBS and
+  prioritized A\* take milliseconds to seconds. The QUBO pruned D is larger
+  than the legacy D here only because of the swap-gadget auxiliary
+  variables.
 
 ### Claims these results do and do not support
 
 * Supported: the space-time QUBO encodes grid MAPF correctly (vertex +
   swap conflicts, verified ground state on small instances). A suitably
-  designed classical annealer solves it reliably up to 7x7 with 6 robots on
-  these instances.
+  designed classical annealer solves it reliably: single robot up to 10x10,
+  and 7x7 with up to 6 robots, where it found joint plans more often than
+  prioritized A\* or CBS (20 s limit).
 * **Not** supported: "classical SA is insufficient beyond D ≈ 425" or "quantum
   hardware becomes necessary". The cliff disappears with a better move set
   on the same classical hardware.
-* **Not** supported: "QUBO beats classical planners". CBS and prioritized
-  space-time A\* are orders of magnitude faster and about as successful.
+* **Not** supported: "QUBO beats classical planners" without qualification.
+  It wins on success rate at k >= 4 under these time limits, but CBS and
+  prioritized space-time A\* are orders of magnitude faster, and CBS is
+  optimal whenever it finishes. State the success rate and the wall-clock
+  time together.
 
 ---
 
